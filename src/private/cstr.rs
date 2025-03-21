@@ -117,6 +117,11 @@ pub fn to_cstring_arg(value: &str) -> Result<CString, crate::sys::EspError> {
     CString::new(value).map_err(nul_to_invalid_arg)
 }
 
+#[cfg(feature = "alloc")]
+pub fn to_option_cstring_arg(src: Option<&str>) -> Result<Option<CString>, EspError> {
+    src.map(|v| to_cstring_arg(v.as_ref())).transpose()
+}
+
 /// str to cstr, will be truncated if str is larger than buf.len() - 1
 ///
 /// # Panics

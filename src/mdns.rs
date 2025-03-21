@@ -18,8 +18,7 @@ use embedded_svc::ipv4::Ipv6Addr;
 
 use crate::sys::*;
 
-use crate::private::cstr::to_cstring_arg;
-use crate::private::cstr::CStr;
+use crate::private::cstr::{to_cstring_arg, to_option_cstring_arg, CStr};
 use crate::private::mutex::Mutex;
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -60,6 +59,20 @@ pub struct QueryResult {
     pub addr: Vec<IpAddr>,
     pub interface: Interface,
     pub ip_protocol: Protocol,
+}
+
+impl Default for QueryResult {
+    fn default() -> Self {
+        QueryResult {
+            instance_name: None,
+            hostname: None,
+            port: 0,
+            txt: Vec::new(),
+            addr: Vec::new(),
+            interface: Interface::STA,
+            ip_protocol: Protocol::V4,
+        }
+    }
 }
 
 impl From<mdns_result_t> for QueryResult {
@@ -341,29 +354,16 @@ impl EspMdns {
         max_results: usize,
         results: &mut [QueryResult],
     ) -> Result<usize, EspError> {
-        let name = if let Some(name) = name {
-            Some(to_cstring_arg(name)?)
-        } else {
-            None
-        };
-        let service_type = if let Some(service_type) = service_type {
-            Some(to_cstring_arg(service_type)?)
-        } else {
-            None
-        };
-        let proto = if let Some(proto) = proto {
-            Some(to_cstring_arg(proto)?)
-        } else {
-            None
-        };
+        let name = to_option_cstring_arg(name)?;
+        let service_type = to_option_cstring_arg(service_type)?;
+        let proto = to_option_cstring_arg(proto)?;
+
         let mut result = core::ptr::null_mut();
         esp!(unsafe {
             mdns_query(
-                name.as_ref().map_or(core::ptr::null(), |x| x.as_ptr()),
-                service_type
-                    .as_ref()
-                    .map_or(core::ptr::null(), |x| x.as_ptr()),
-                proto.as_ref().map_or(core::ptr::null(), |x| x.as_ptr()),
+                name.map_or(core::ptr::null(), |x| x.as_ptr()),
+                service_type.map_or(core::ptr::null(), |x| x.as_ptr()),
+                proto.map_or(core::ptr::null(), |x| x.as_ptr()),
                 mdns_type as _,
                 timeout.as_millis() as _,
                 max_results as _,
@@ -478,6 +478,51 @@ impl EspMdns {
 
         Ok(copy_query_results(result, results))
     }
+
+    pub fn create_query(
+        &self,
+        name: Option<&str>,
+        service_type: Option<&str>,
+        proto: Option<&str>,
+        mdns_type: Type,
+        timeout: Duration,
+        max_results: usize,
+    ) -> Result<EspMdnsQuery, EspError> {
+        let name = to_option_cstring_arg(name)?;
+        let service_type = to_option_cstring_arg(service_type)?;
+        let proto = to_option_cstring_arg(proto)?;
+
+        info!(
+            "{:?} {:?} {:?} {:?} {:?} {:?} {:?} {:?} {:?} ",
+            name,
+            name.as_ref().map_or(core::ptr::null(), |x| x.as_ptr()),
+            service_type,
+            service_type
+                .as_ref()
+                .map_or(core::ptr::null(), |x| x.as_ptr()),
+            proto,
+            proto.as_ref().map_or(core::ptr::null(), |x| x.as_ptr()),
+            mdns_type as u16,
+            timeout.as_millis() as u32,
+            max_results as usize
+        );
+
+        let query = unsafe {
+            mdns_query_async_new(
+                name.as_ref().map_or(core::ptr::null(), |x| x.as_ptr()),
+                service_type
+                    .as_ref()
+                    .map_or(core::ptr::null(), |x| x.as_ptr()),
+                proto.as_ref().map_or(core::ptr::null(), |x| x.as_ptr()),
+                mdns_type as _,
+                max_results as _,
+                timeout.as_millis() as _,
+                None,
+            )
+        };
+
+        Ok(EspMdnsQuery { search: query })
+    }
 }
 
 impl Drop for EspMdns {
@@ -487,6 +532,41 @@ impl Drop for EspMdns {
         unsafe { mdns_free() };
 
         *taken = false;
+    }
+}
+
+pub struct EspMdnsQuery {
+    search: *mut mdns_search_once_t,
+}
+
+impl EspMdnsQuery {
+    pub fn get_results(
+        &self,
+        timeout: Duration,
+        results: &mut [QueryResult],
+    ) -> Result<Option<usize>, EspError> {
+        let mut result = core::ptr::null_mut();
+        let mut num_results = 0_u8;
+        if !unsafe {
+            mdns_query_async_get_results(
+                self.search,
+                timeout.as_millis() as _,
+                &mut result,
+                &mut num_results,
+            )
+        } {
+            Ok(None)
+        } else {
+            info!("result: {:?}", result);
+            info!("NUM RESULTS: {}", num_results);
+            Ok(Some(copy_query_results(result, results)))
+        }
+    }
+}
+
+impl Drop for EspMdnsQuery {
+    fn drop(&mut self) {
+        unsafe { mdns_query_async_delete(self.search) };
     }
 }
 
